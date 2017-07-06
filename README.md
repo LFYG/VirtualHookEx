@@ -1,52 +1,24 @@
-VirtualHook
------------
+# VirtualHookEx
+VirtualHookEx基于以下项目修改而来:
+- [VirtualHook](https://github.com/rk700/VirtualHook). A tool for hooking application without root permission.
 
-## Introduction 
+主要修改:
+- 使用[AndHook](https://github.com/rrrfff/andhook)替换[YAHFA](https://github.com/rk700/YAHFA)，从而实现对Dalvik虚拟机的支持
+- [lib\src\main\java\com\lody\virtual\client\VClientImpl.java](https://github.com/rrrfff/VirtualHookEx/blob/master/lib/src/main/java/com/lody/virtual/client/VClientImpl.java)，修改插件加载逻辑，方便分别在程序加载前、后注入代码
+- [lib\src\main\jni\Foundation\VMPatch.cpp](https://github.com/rrrfff/VirtualHookEx/blob/master/lib/src/main/jni/Foundation/VMPatch.cpp)，修复在android 4.x上复现的一些bug，包括因现有hook方式与旧版本libhoudini不兼容导致的模拟器crash、相机组件无法使用等
 
-VirtualHook is a tool for hooking application without root permission. It is based on two projects:
+插件编写:
+- 准备 AndHook 支持, 此步按需操作一次即可
+	- 将 AndHook 项目 src/*.class 导出为jar包: AndHook.jar
+	- 将 AndHook 项目导出为apk(可不签名; 因apk文件容易被误清理故改后缀zip)得到: AndHook.zip
+	- adb push AndHook.zip /sdcard/io.virtualhook
+- 在项目中引用 AndHook.jar, 注意该jar不需要参与Build
+- 按需实现 io.virtualhook.PreHook 和 io.virtualhook.PostHook 类, 具体可参考示例[examples\VirtualPhone](https://github.com/rrrfff/VirtualHookEx/tree/master/examples/VirtualPhone)
+- 导出生成apk并push到/sdcard/io.virtualhook下
 
-- [VirtualApp](https://github.com/asLody/VirtualApp). It's a plugin framework which allows running applications in its virtual space.
-- [YAHFA](https://github.com/rk700/YAHFA). It's a hook framework for ART which allows hooking Java method of the application.
-
-Currently VirtualHook supports:
-
-- Android 5.0(API 21)
-- Android 5.1(API 22)
-- Android 6.0(API 23)
-- __EXPERIMENTAL__ Android 7.0(API 24)
-- __EXPERIMENTAL__ Android 7.1(API 25)
-
-## Build
-
-Import and build the project in Android Studio(__with Instant Run disabled__). There are four modules:
-
-- `app`. This is the VirtualApp application module.
-- `lib`. This is the VirtualApp library module.
-- `YAHFA`. This is the YAHFA hook module.
-- `demoHookPlugin`. This is a demo hook plugin which compiles to an APK.
-
-After building the APKs, push the `demoHookPlugin` APK to device in folder `/sdcard/io.virtualhook/` and run the main application. All plugin APKs in `/sdcard/io.virtualhook` would be applied to applications running in VirtualHook.
-
-Please refer to [demoHookPlugin](https://github.com/rk700/VirtualHook/tree/master/VirtualApp/demoHookPlugin) for more details.
-
-## Hooking Native Methods
-
-VirtualApp comes with native method hooking ability in the first place, which is done with the following function:
-
-```cpp
-namespace Cydia{
-    void MSHookFunction(void *symbol, void *replace, void **result);
-}
-```
-
-To utilize that, you can use `dlsym()` to find the symbol and then hook your targets. Here's a [demo](https://github.com/rk700/ChangePhoneInfo/blob/master/app/src/main/jni/hookprop.c) which hooks `__system_property_get`.
-
-## Example Hook Plugins
-
-- [CertUnpinning](https://github.com/rk700/CertUnpinning): HTTPS certificate unpinning.
-- [ChangePhoneInfo](https://github.com/rk700/ChangePhoneInfo): Change device information.
-- [VirtualHosts](https://github.com/rk700/VirtualHosts): Custom hostname resolution.
-
-## License
-
-Both VirtualApp and YAHFA are distributed under GNU GPL V3.
+插件加载流程:
+- VClientImpl.java: bindApplicationNoCheck
+- 加载/sdcard/io.virtualhook/AndHook.zip作为插件的共享库
+- 加载/sdcard/io.virtualhook/下其它插件(.apk/.zip/.jar), 并加载 io.virtualhook.PreHook 和 io.virtualhook.PostHook 类(如果有)
+- 在程序 OnCreate 前调用 io.virtualhook.PreHook.Init(ClassLoader patchClassLoader, Context context, String processName)
+- 在程序 OnCreate 后调用 io.virtualhook.PostHook.Init(ClassLoader patchClassLoader, Application app, String processName), 注意此时可能会产生线程安全问题
