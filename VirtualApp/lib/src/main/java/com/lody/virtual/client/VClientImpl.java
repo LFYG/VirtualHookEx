@@ -15,6 +15,7 @@ import android.content.pm.ProviderInfo;
 import android.os.Binder;
 import android.os.Build;
 import android.os.ConditionVariable;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.IInterface;
@@ -50,6 +51,7 @@ import com.lody.virtual.remote.InstalledAppInfo;
 import com.lody.virtual.remote.PendingResultData;
 
 import java.io.File;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -57,7 +59,6 @@ import java.util.List;
 import java.util.Map;
 
 import dalvik.system.DexClassLoader;
-import lab.galaxy.yahfa.HookMain;
 import mirror.android.app.ActivityThread;
 import mirror.android.app.ActivityThreadNMR1;
 import mirror.android.app.ContextImpl;
@@ -221,6 +222,7 @@ public final class VClientImpl extends IVClient.Stub {
             Process.killProcess(0);
             System.exit(0);
         }
+
         data.appInfo = VPackageManager.get().getApplicationInfo(packageName, 0, getUserId(vuid));
         data.processName = processName;
         data.providers = VPackageManager.get().queryContentProviders(processName, getVUid(), PackageManager.GET_META_DATA);
@@ -281,6 +283,23 @@ public final class VClientImpl extends IVClient.Stub {
         if (!conflict) {
             InvocationStubManager.getInstance().checkEnv(AppInstrumentation.class);
         }
+
+        // @rrrfff 2017/06/10
+        final Object[] pluginItems = loadPluginApks(context);
+        if (pluginItems != null) {
+            for (int index = 0; index < pluginItems.length; index += 3) {
+                final Method setup = (Method) pluginItems[index + 1];
+                if (setup != null) {
+                    try {
+                        setup.invoke(null, pluginItems[index],
+                                context, mBoundApplication.processName);
+                    } catch (Exception e) {
+                        VLog.e(TAG, e);
+                    }
+                }
+            }
+        }
+
         mInitialApplication = LoadedApk.makeApplication.call(data.info, false, null);
         mirror.android.app.ActivityThread.mInitialApplication.set(mainThread, mInitialApplication);
         ContextFixer.fixContext(mInitialApplication);
@@ -308,46 +327,101 @@ public final class VClientImpl extends IVClient.Stub {
                                 + ": " + e.toString(), e);
             }
         }
-        VActivityManager.get().appDoneExecuting();
 
-        ClassLoader targetClassLoader = mInitialApplication.getClassLoader();
-
-        try {
-            File hookFolder = new File("/sdcard/io.virtualhook");
-            for(File hookFile : hookFolder.listFiles()) {
-                applyHookPlugin(hookFile, targetClassLoader);
+        // @rrrfff 2017/06/10
+        if (pluginItems != null) {
+            for (int index = 0; index < pluginItems.length; index += 3) {
+                final Method setup = (Method) pluginItems[index + 2];
+                if (setup != null) {
+                    try {
+                        setup.invoke(null, pluginItems[index],
+                                mInitialApplication, mBoundApplication.processName);
+                    } catch (Exception e) {
+                        VLog.e(TAG, e);
+                    }
+                }
             }
+        }
 
-        }
-        catch (Exception e) {
-            e.printStackTrace();
-        }
+        VActivityManager.get().appDoneExecuting();
     }
 
-    private void applyHookPlugin(File patchApk, ClassLoader appClassLoader) {
-        HookMain hookMain = new HookMain();
-        File libDir = ensureCreated(
-            new File(VEnvironment.getDataUserPackageDirectory(VUserHandle.myUserId(), patchApk.getName()), "lib")
-        );
-
+    private Object[] loadPluginApks(Context context) {
+        File[] pluginFiles;
+        final String pluginDir = Environment
+                .getExternalStorageDirectory().getPath() + "/io.virtualhook/";
         try {
-            // copy native libraries from patch plugin
-            NativeLibraryHelperCompat.copyNativeBinaries(patchApk, libDir);
-            // copy libva-native.so so that the symbol MSHookFunction() can be accessed in patch plugin after Android N
-            FileUtils.createSymlink(
-                    new File(VirtualCore.get().getContext().getApplicationInfo().dataDir,
-                            "lib/libva-native.so").getAbsolutePath()
-                    , new File(libDir, "libva-native.so").getAbsolutePath());
-        }
-        catch (Exception e) {
-            e.printStackTrace();
+            pluginFiles = (new File(pluginDir))
+                    .listFiles();
+        } catch (Exception e) {
+            VLog.e("loadPluginApks", e);
+            return null;
         }
 
-        DexClassLoader dexClassLoader = new DexClassLoader(patchApk.getAbsolutePath(),
-                VEnvironment.getDalvikCacheDirectory().getAbsolutePath(),
-                libDir.getAbsolutePath(),
-                appClassLoader);
-        hookMain.doHookDefault(dexClassLoader, appClassLoader);
+        final String cacheDir = VEnvironment
+                .getDalvikCacheDirectory()
+                .getAbsolutePath();
+        final File preSharedLib = new File(pluginDir + "AndHook.zip");
+        NativeLibraryHelperCompat.copyNativeBinaries(preSharedLib,
+                new File(cacheDir));
+        final DexClassLoader andHookLoader = new DexClassLoader(
+                preSharedLib.getAbsolutePath(), cacheDir,
+                cacheDir,
+                context.getClassLoader());
+
+        Object[] pluginItems = null;
+        int index = 0;
+        for (final File patchApk : pluginFiles) {
+            final String apkName = patchApk.getName();
+            if ((apkName.endsWith(".apk") || apkName.endsWith(".zip") || apkName.endsWith(".jar")) && !apkName.equalsIgnoreCase(preSharedLib.getName())) {
+                try {
+                    final File libDir = ensureCreated(new File(
+                            VEnvironment.getDataUserPackageDirectory(
+                                    VUserHandle.myUserId(), patchApk.getName()),
+                            "lib"));
+                    // copy native libraries from patch plugin
+                    NativeLibraryHelperCompat.copyNativeBinaries(patchApk,
+                            libDir);
+                    // copy libva-native.so so that the symbol MSHookFunction() can be accessed in patch plugin after Android N
+                    FileUtils.createSymlink(
+                            new File(VirtualCore.get().getContext().getApplicationInfo().dataDir,
+                                    "lib/libva-native.so").getAbsolutePath()
+                            , new File(libDir, "libva-native.so").getAbsolutePath());
+
+                    final DexClassLoader dexClassLoader = new DexClassLoader(
+                            patchApk.getAbsolutePath(), cacheDir,
+                            libDir.getAbsolutePath(),
+                            andHookLoader);
+
+                    if (pluginItems == null)
+                        pluginItems = new Object[pluginFiles.length * 3];
+                    pluginItems[index] = dexClassLoader;
+
+                    try {
+                        final Class<?> preCls = Class.forName(
+                                "io.virtualhook.PreHook", true,
+                                dexClassLoader);
+                        pluginItems[index + 1] = preCls.getDeclaredMethod(
+                                "Init", ClassLoader.class, Context.class,
+                                String.class);
+                    } catch (Exception e) {
+                        VLog.w(TAG, "class io.virtualhook.PreHook unavailable at " + patchApk.getName());
+                    }
+
+                    final Class<?> postCls = Class
+                            .forName("io.virtualhook.PostHook", true,
+                                    dexClassLoader);
+                    pluginItems[index + 2] = postCls.getDeclaredMethod(
+                            "Init", ClassLoader.class, Application.class,
+                            String.class);
+                } catch (Exception e) {
+                    VLog.w(TAG, "class io.virtualhook.PostHook unavailable at " + patchApk.getName());
+                }
+                index += 3;
+            }
+        }
+
+        return pluginItems;
     }
 
     private void setupUncaughtHandler() {
